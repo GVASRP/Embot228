@@ -1,7 +1,6 @@
 {
   "name": "emilia-rp-bot",
   "version": "1.0.0",
-  "description": "Telegram RP Bot for Emilia",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
