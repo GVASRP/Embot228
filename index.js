@@ -57,7 +57,7 @@ const saveDataToDisk = () => {
     }
 };
 
-// Загружаем данные сразу при старте скрипта
+// Загружаем данные сразу при старте
 loadDataFromDisk();
 
 // ЗАГЛУШКА ДЛЯ RENDER
@@ -79,6 +79,7 @@ const getTopicsKeyboard = () => {
     return { inline_keyboard: buttons };
 };
 
+// Хэндлер выбора тем
 bot.on('callback_query', async (ctx) => {
     if (ctx.from.id !== MY_TELEGRAM_ID) return ctx.answerCbQuery('Доступ закрыт.');
     
@@ -97,6 +98,7 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
+// Команда меню
 bot.command('menu', async (ctx) => {
     if (ctx.from.id !== MY_TELEGRAM_ID) return;
     if (!RP_CHAT_ID) return ctx.reply('⚠️ Бот еще не привязан к группе. Напишите что-нибудь в РП-темах группы.');
@@ -106,6 +108,30 @@ bot.command('menu', async (ctx) => {
     });
 });
 
+// ХЭНДЛЕР РЕАКЦИЙ
+bot.on('message_reaction', async (ctx) => {
+    if (ctx.chat.type !== 'private' || ctx.from.id !== MY_TELEGRAM_ID) return;
+
+    const logMsgId = ctx.messageReaction.message_id.toString();
+    const targetGroupId = msgMapToChat.get(logMsgId);
+
+    if (targetGroupId && RP_CHAT_ID) {
+        try {
+            const newReactions = ctx.messageReaction.new_reaction;
+            const reactionsToSend = newReactions.map(r => {
+                if (r.type === 'custom_emoji') {
+                    return { type: 'custom_emoji', custom_emoji_id: r.custom_emoji_id };
+                }
+                return { type: 'emoji', emoji: r.emoji };
+            });
+            await ctx.telegram.setMessageReaction(RP_CHAT_ID, Number(targetGroupId), reactionsToSend);
+        } catch (e) {
+            console.error('Не удалось переслать реакцию:', e);
+        }
+    }
+});
+
+// Основной хэндлер сообщений
 bot.on(['message', 'edited_message'], async (ctx) => {
     const msg = ctx.message || ctx.editedMessage;
     if (!msg) return;
@@ -133,6 +159,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
 
         if (needSave) saveDataToDisk();
 
+        // Проверяем, активна ли тема и пишет ли посторонний игрок
         if (msg.from.id !== MY_TELEGRAM_ID && currentTopicId === activeTopicId) {
             try {
                 const senderName = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
@@ -140,15 +167,24 @@ bot.on(['message', 'edited_message'], async (ctx) => {
 
                 let logMsg;
                 if (msg.text) {
+                    // Текст шлем напрямую без копирования объекта сообщения
                     logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + msg.text, { parse_mode: 'Markdown' });
                 } else {
-                    await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader, { parse_mode: 'Markdown' });
-                    logMsg = await ctx.telegram.copyMessage(MY_TELEGRAM_ID, RP_CHAT_ID, msg.message_id);
+                    // Для медиа используем безопасный try-catch
+                    try {
+                        await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader, { parse_mode: 'Markdown' });
+                        logMsg = await ctx.telegram.copyMessage(MY_TELEGRAM_ID, RP_CHAT_ID, msg.message_id);
+                    } catch (copyError) {
+                        // Если у юзера приватность, copyMessage упадет. На этот случай шлем текстовое уведомление
+                        logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + `*Отправил медиафайл* (скрыто настройками приватности пользователя 🔒)`, { parse_mode: 'Markdown' });
+                    }
                 }
 
-                msgMapToLog.set(msg.message_id.toString(), logMsg.message_id.toString());
-                msgMapToChat.set(logMsg.message_id.toString(), msg.message_id.toString());
-                saveDataToDisk();
+                if (logMsg) {
+                    msgMapToLog.set(msg.message_id.toString(), logMsg.message_id.toString());
+                    msgMapToChat.set(logMsg.message_id.toString(), msg.message_id.toString());
+                    saveDataToDisk();
+                }
             } catch (e) {
                 console.error('Ошибка логирования в личку:', e);
             }
@@ -164,7 +200,6 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         let replyToMessageId = undefined;
         if (msg.reply_to_message) {
             const targetGroupId = msgMapToChat.get(msg.reply_to_message.message_id.toString());
-            // ВОТ ТУТ ФИКС: принудительно переводим ID из строки обратно в число!
             if (targetGroupId) replyToMessageId = Number(targetGroupId);
         }
 
@@ -188,7 +223,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
     }
 });
 
-bot.launch().then(() => console.log('Эмилия защищена локальной БД и запущена!'));
+bot.launch().then(() => console.log('Эмилия полностью защищена и обновлена!'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
