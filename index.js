@@ -42,11 +42,10 @@ const saveDataToDisk = () => {
 
 loadDataFromDisk();
 
-// Сервер-заглушка
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Emilia Online\n');
+    res.end('Emilia Live\n');
 }).listen(PORT);
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -61,7 +60,6 @@ const getTopicsKeyboard = () => {
     return { inline_keyboard: buttons };
 };
 
-// Переключение тем
 bot.on('callback_query', async (ctx) => {
     if (ctx.callbackQuery.data.startsWith('select_topic:')) {
         const topicId = ctx.callbackQuery.data.split(':')[1];
@@ -78,7 +76,7 @@ bot.command('menu', async (ctx) => {
     }
 });
 
-// СИНХРОНИЗАЦИЯ РЕАКЦИЙ С ДИСКА
+// СИНХРОНИЗАЦИЯ РЕАКЦИЙ
 bot.on('message_reaction', async (ctx) => {
     if (ctx.chat.type !== 'private' || ctx.from.id !== MY_TELEGRAM_ID) return;
     const logMsgId = ctx.messageReaction.message_id.toString();
@@ -94,76 +92,78 @@ bot.on('message_reaction', async (ctx) => {
     }
 });
 
-// ОБЩАЯ ФУНКЦИЯ ЛОГИРОВАНИЯ ИЗ ГРУППЫ В ЛИЧКУ
-async function logGroupMessageToUser(ctx, msg, isTextOnly) {
-    RP_CHAT_ID = ctx.chat.id;
-    const currentTopicId = msg.message_thread_id || 0;
-
-    // Регистрация тем
-    if (msg.reply_to_message && msg.reply_to_message.forum_topic_created) {
-        topics.set(currentTopicId, msg.reply_to_message.forum_topic_created.name);
-        saveDataToDisk();
-    } else if (!topics.has(currentTopicId)) {
-        topics.set(currentTopicId, `Тема #${currentTopicId || 'Главная'}`);
-        saveDataToDisk();
-    }
-    if (activeTopicId === null) {
-        activeTopicId = currentTopicId;
-        saveDataToDisk();
-    }
-
-    // Проверяем отправителя
-    const isFromBank = msg.from.is_bot && msg.from.username === BANK_BOT_USERNAME;
-    const isFromOtherUser = !msg.from.is_bot && msg.from.id !== MY_TELEGRAM_ID;
-
-    // Сюда попадают ТОЛЬКО сообщения из активной темы от других игроков или банка
-    if ((isFromOtherUser || isFromBank) && currentTopicId === activeTopicId) {
-        try {
-            const senderName = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
-            let replyInfo = '';
-            
-            if (msg.reply_to_message && !msg.reply_to_message.forum_topic_created) {
-                const origSender = msg.reply_to_message.from;
-                const origName = origSender.username ? `@${origSender.username}` : origSender.first_name;
-                replyInfo = ` (в ответ на ${origName})`;
-            }
-
-            const forwardHeader = `💬 **${senderName}**${replyInfo} в теме [${topics.get(currentTopicId)}]:\n`;
-
-            let logMsg;
-            if (isTextOnly && msg.text) {
-                logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + msg.text, { parse_mode: 'Markdown' });
-            } else {
-                try {
-                    await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader, { parse_mode: 'Markdown' });
-                    logMsg = await ctx.telegram.copyMessage(MY_TELEGRAM_ID, RP_CHAT_ID, msg.message_id);
-                } catch (err) {
-                    logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + `*Отправил медиафайл* 🔒`, { parse_mode: 'Markdown' });
-                }
-            }
-
-            if (logMsg) {
-                msgMapToLog.set(msg.message_id.toString(), logMsg.message_id.toString());
-                msgMapToChat.set(logMsg.message_id.toString(), msg.message_id.toString());
-                saveDataToDisk();
-            }
-        } catch (e) { console.error('Ошибка форварда:', e); }
-    }
-}
-
-// ХЭНДЛЕРЫ ДЛЯ ГРУППЫ
-bot.on('text', async (ctx) => {
-    if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
-        await logGroupMessageToUser(ctx, ctx.message, true);
-    }
-});
-
-bot.on('message', async (ctx) => {
-    const msg = ctx.message;
+// ЕДИНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕГО
+bot.on(['message', 'edited_message'], async (ctx) => {
+    const msg = ctx.message || ctx.editedMessage;
     if (!msg) return;
 
-    // Если пишет юзер боту в личку
-    if (ctx.chat.type === 'private' && msg.from.id === MY_TELEGRAM_ID) {
+    const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+    const isPrivate = ctx.chat.type === 'private';
+
+    // 1. ЕСЛИ ПРИШЛО СООБЩЕНИЕ ИЗ ГРУППЫ
+    if (isGroup) {
+        RP_CHAT_ID = ctx.chat.id;
+        const currentTopicId = msg.message_thread_id || 0;
+        let needSave = false;
+
+        if (msg.reply_to_message && msg.reply_to_message.forum_topic_created) {
+            topics.set(currentTopicId, msg.reply_to_message.forum_topic_created.name);
+            needSave = true;
+        } else if (!topics.has(currentTopicId)) {
+            topics.set(currentTopicId, `Тема #${currentTopicId || 'Главная'}`);
+            needSave = true;
+        }
+
+        if (activeTopicId === null) {
+            activeTopicId = currentTopicId;
+            needSave = true;
+        }
+        if (needSave) saveDataToDisk();
+
+        // Проверяем автора (игнорируем себя, пускаем других людей и нашего банк-бота)
+        const isFromBank = msg.from.is_bot && msg.from.username === BANK_BOT_USERNAME;
+        const isFromOtherUser = !msg.from.is_bot && msg.from.id !== MY_TELEGRAM_ID;
+
+        if ((isFromOtherUser || isFromBank) && currentTopicId === activeTopicId) {
+            try {
+                const senderName = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
+                let replyInfo = '';
+                
+                // Проверяем реплай
+                if (msg.reply_to_message && !msg.reply_to_message.forum_topic_created) {
+                    const origSender = msg.reply_to_message.from;
+                    const origName = origSender.username ? `@${origSender.username}` : origSender.first_name;
+                    replyInfo = ` (в ответ на ${origName})`;
+                }
+
+                const forwardHeader = `💬 **${senderName}**${replyInfo} в теме [${topics.get(currentTopicId)}]:\n`;
+
+                let logMsg;
+                // ФИКС: Проверяем тип сообщения строго по наличию текста
+                if (msg.text) {
+                    logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + msg.text, { parse_mode: 'Markdown' });
+                } else {
+                    // Если это гифка, фото или стикер — шлем заголовок, а потом копируем медиа
+                    await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader, { parse_mode: 'Markdown' });
+                    try {
+                        logMsg = await ctx.telegram.copyMessage(MY_TELEGRAM_ID, RP_CHAT_ID, msg.message_id);
+                    } catch (err) {
+                        logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, `*Отправил медиафайл* 🔒`, { parse_mode: 'Markdown' });
+                    }
+                }
+
+                if (logMsg) {
+                    msgMapToLog.set(msg.message_id.toString(), logMsg.message_id.toString());
+                    msgMapToChat.set(logMsg.message_id.toString(), msg.message_id.toString());
+                    saveDataToDisk();
+                }
+            } catch (e) { console.error('Ошибка логирования:', e); }
+        }
+        return;
+    }
+
+    // 2. ЕСЛИ ТЫ ПИШЕШЬ БОТУ В ЛИЧКУ
+    if (isPrivate && msg.from.id === MY_TELEGRAM_ID) {
         if (!RP_CHAT_ID || activeTopicId === null) return ctx.reply('⚠️ Сначала напишите в группе.');
 
         let replyToMessageId = undefined;
@@ -182,17 +182,11 @@ bot.on('message', async (ctx) => {
             msgMapToLog.set(sentMsg.message_id.toString(), msg.message_id.toString());
             saveDataToDisk();
             await ctx.react('✅').catch(() => {});
-        } catch (error) { console.error('Ошибка отправки:', error); }
-        return;
-    }
-
-    // Если это группа (для медиафайлов, стикеров и гифок)
-    if ((ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') && !msg.text) {
-        await logGroupMessageToUser(ctx, msg, false);
+        } catch (error) { console.error('Ошибка отправки в группу:', error); }
     }
 });
 
-bot.launch().then(() => console.log('Эмилия полностью пересобрана и запущена!'));
+bot.launch().then(() => console.log('Emilia is fully operational!'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
