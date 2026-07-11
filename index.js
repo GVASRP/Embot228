@@ -6,19 +6,19 @@ const path = require('path');
 // === НАСТРОЙКИ ===
 const BOT_TOKEN = '8696927422:AAGe2rDO5uDKY4Ac5B8_EDQvLYYL91ivNns'; 
 const MY_TELEGRAM_ID = 6318051388; 
+const BANK_BOT_USERNAME = 'GVBank_bot'; // Юзернейм твоего банка без собачки
 
 // Пути к файлам сохранения
 const TOPICS_FILE = path.join(__dirname, 'topics_db.json');
 const MSGMAP_FILE = path.join(__dirname, 'msgmap_db.json');
 
-// Переменные состояния
 let RP_CHAT_ID = null;
 let activeTopicId = null;
 let topics = new Map();
 let msgMapToChat = new Map();
 let msgMapToLog = new Map();
 
-// === ФУНКЦИИ ДЛЯ РАБОТЫ С ДИСКОМ ===
+// === РАБОТА С ДИСКОМ ===
 const loadDataFromDisk = () => {
     try {
         if (fs.existsSync(TOPICS_FILE)) {
@@ -26,45 +26,33 @@ const loadDataFromDisk = () => {
             RP_CHAT_ID = raw.RP_CHAT_ID || null;
             activeTopicId = raw.activeTopicId !== undefined ? raw.activeTopicId : null;
             topics = new Map(Object.entries(raw.topics || {}));
-            console.log('📋 Темы успешно загружены с диска!');
         }
         if (fs.existsSync(MSGMAP_FILE)) {
             const raw = JSON.parse(fs.readFileSync(MSGMAP_FILE, 'utf8'));
             msgMapToChat = new Map(Object.entries(raw.toChat || {}));
             msgMapToLog = new Map(Object.entries(raw.toLog || {}));
-            console.log('🔗 Связи сообщений успешно загружены с диска!');
         }
     } catch (e) {
-        console.error('Ошибка чтения базы данных с диска:', e);
+        console.error('Ошибка загрузки БД:', e);
     }
 };
 
 const saveDataToDisk = () => {
     try {
-        const topicsData = {
-            RP_CHAT_ID,
-            activeTopicId,
-            topics: Object.fromEntries(topics)
-        };
-        const msgmapData = {
-            toChat: Object.fromEntries(msgMapToChat),
-            toLog: Object.fromEntries(msgMapToLog)
-        };
-        fs.writeFileSync(TOPICS_FILE, JSON.stringify(topicsData, null, 2), 'utf8');
-        fs.writeFileSync(MSGMAP_FILE, JSON.stringify(msgmapData, null, 2), 'utf8');
+        fs.writeFileSync(TOPICS_FILE, JSON.stringify({ RP_CHAT_ID, activeTopicId, topics: Object.fromEntries(topics) }, null, 2), 'utf8');
+        fs.writeFileSync(MSGMAP_FILE, JSON.stringify({ toChat: Object.fromEntries(msgMapToChat), toLog: Object.fromEntries(msgMapToLog) }, null, 2), 'utf8');
     } catch (e) {
-        console.error('Ошибка записи базы данных на диск:', e);
+        console.error('Ошибка записи БД:', e);
     }
 };
 
-// Загружаем данные сразу при старте
 loadDataFromDisk();
 
-// ЗАГЛУШКА ДЛЯ RENDER
+// ЗАГЛУШКА RENDER
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Emilia RP Bot is running stable!\n');
+    res.end('Emilia stable execution\n');
 }).listen(PORT);
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -79,59 +67,44 @@ const getTopicsKeyboard = () => {
     return { inline_keyboard: buttons };
 };
 
-// Хэндлер выбора тем
 bot.on('callback_query', async (ctx) => {
     if (ctx.from.id !== MY_TELEGRAM_ID) return ctx.answerCbQuery('Доступ закрыт.');
-    
     const data = ctx.callbackQuery.data;
     if (data.startsWith('select_topic:')) {
         const topicId = data.split(':')[1];
         activeTopicId = topicId === '0' ? 0 : Number(topicId);
-        
         saveDataToDisk();
-        
         await ctx.answerCbQuery(`Выбрана тема: ${topics.get(activeTopicId)}`);
-        await ctx.editMessageText(`Вы переключились на тему: **${topics.get(activeTopicId)}**\nВсе сообщения и медиа отправляются туда.`, {
-            parse_mode: 'Markdown',
-            reply_markup: getTopicsKeyboard()
-        });
+        await ctx.editMessageText(`Вы переключились на тему: **${topics.get(activeTopicId)}**`, { parse_mode: 'Markdown', reply_markup: getTopicsKeyboard() });
     }
 });
 
-// Команда меню
 bot.command('menu', async (ctx) => {
-    if (ctx.from.id !== MY_TELEGRAM_ID) return;
-    if (!RP_CHAT_ID) return ctx.reply('⚠️ Бот еще не привязан к группе. Напишите что-нибудь в РП-темах группы.');
-    
-    await ctx.reply('Выберите активную тему для отправки сообщений от имени Эмилии:', {
-        reply_markup: getTopicsKeyboard()
-    });
+    if (ctx.from.id !== MY_TELEGRAM_ID || !RP_CHAT_ID) return;
+    await ctx.reply('Выберите активную тему:', { reply_markup: getTopicsKeyboard() });
 });
 
-// ХЭНДЛЕР РЕАКЦИЙ
+// ФИКС РЕАКЦИЙ: Слушаем обновление реакций и преобразуем ключи корректно
 bot.on('message_reaction', async (ctx) => {
     if (ctx.chat.type !== 'private' || ctx.from.id !== MY_TELEGRAM_ID) return;
-
+    
     const logMsgId = ctx.messageReaction.message_id.toString();
     const targetGroupId = msgMapToChat.get(logMsgId);
 
     if (targetGroupId && RP_CHAT_ID) {
         try {
-            const newReactions = ctx.messageReaction.new_reaction;
-            const reactionsToSend = newReactions.map(r => {
-                if (r.type === 'custom_emoji') {
-                    return { type: 'custom_emoji', custom_emoji_id: r.custom_emoji_id };
-                }
+            const reactions = ctx.messageReaction.new_reaction.map(r => {
+                if (r.type === 'custom_emoji') return { type: 'custom_emoji', custom_emoji_id: r.custom_emoji_id };
                 return { type: 'emoji', emoji: r.emoji };
             });
-            await ctx.telegram.setMessageReaction(RP_CHAT_ID, Number(targetGroupId), reactionsToSend);
+            await ctx.telegram.setMessageReaction(RP_CHAT_ID, Number(targetGroupId), reactions);
         } catch (e) {
-            console.error('Не удалось переслать реакцию:', e);
+            console.error('Ошибка синхронизации реакции:', e);
         }
     }
 });
 
-// Основной хэндлер сообщений
+// ГЛАВНЫЙ ОБРАБОТЧИК
 bot.on(['message', 'edited_message'], async (ctx) => {
     const msg = ctx.message || ctx.editedMessage;
     if (!msg) return;
@@ -143,7 +116,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         RP_CHAT_ID = ctx.chat.id;
         const currentTopicId = msg.message_thread_id || 0;
         let needSave = false;
-        
+
         if (msg.reply_to_message && msg.reply_to_message.forum_topic_created) {
             topics.set(currentTopicId, msg.reply_to_message.forum_topic_created.name);
             needSave = true;
@@ -152,31 +125,39 @@ bot.on(['message', 'edited_message'], async (ctx) => {
             needSave = true;
         }
 
-        if (!activeTopicId && activeTopicId !== 0) {
+        if (activeTopicId === null) {
             activeTopicId = currentTopicId;
             needSave = true;
         }
-
         if (needSave) saveDataToDisk();
 
-        // Проверяем, активна ли тема и пишет ли посторонний игрок
-        if (msg.from.id !== MY_TELEGRAM_ID && currentTopicId === activeTopicId) {
+        // Фильтр: Пропускаем людей И твоего банк-бота
+        const isFromBank = msg.from.is_bot && msg.from.username === BANK_BOT_USERNAME;
+        const isFromOtherUser = !msg.from.is_bot && msg.from.id !== MY_TELEGRAM_ID;
+
+        if ((isFromOtherUser || isFromBank) && currentTopicId === activeTopicId) {
             try {
                 const senderName = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
-                const forwardHeader = `💬 **${senderName}** в теме [${topics.get(currentTopicId)}]:\n`;
+                
+                // Проверяем, на кого ответили
+                let replyInfo = '';
+                if (msg.reply_to_message && !msg.reply_to_message.forum_topic_created) {
+                    const originalSender = msg.reply_to_message.from;
+                    const originalName = originalSender.username ? `@${originalSender.username}` : originalSender.first_name;
+                    replyInfo = ` (в ответ на ${originalName})`;
+                }
+
+                const forwardHeader = `💬 **${senderName}**${replyInfo} в теме [${topics.get(currentTopicId)}]:\n`;
 
                 let logMsg;
                 if (msg.text) {
-                    // Текст шлем напрямую без копирования объекта сообщения
                     logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + msg.text, { parse_mode: 'Markdown' });
                 } else {
-                    // Для медиа используем безопасный try-catch
                     try {
                         await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader, { parse_mode: 'Markdown' });
                         logMsg = await ctx.telegram.copyMessage(MY_TELEGRAM_ID, RP_CHAT_ID, msg.message_id);
-                    } catch (copyError) {
-                        // Если у юзера приватность, copyMessage упадет. На этот случай шлем текстовое уведомление
-                        logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + `*Отправил медиафайл* (скрыто настройками приватности пользователя 🔒)`, { parse_mode: 'Markdown' });
+                    } catch (err) {
+                        logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + `*Отправил медиа* 🔒`, { parse_mode: 'Markdown' });
                     }
                 }
 
@@ -186,16 +167,14 @@ bot.on(['message', 'edited_message'], async (ctx) => {
                     saveDataToDisk();
                 }
             } catch (e) {
-                console.error('Ошибка логирования в личку:', e);
+                console.error('Ошибка пересылки:', e);
             }
         }
         return;
     }
 
     if (isPrivate && msg.from.id === MY_TELEGRAM_ID) {
-        if (!RP_CHAT_ID || activeTopicId === null) {
-            return ctx.reply('⚠️ Напишите сначала любое сообщение в нужной теме внутри группы, чтобы бот её увидел.');
-        }
+        if (!RP_CHAT_ID || activeTopicId === null) return ctx.reply('⚠️ Сначала напишите в группе.');
 
         let replyToMessageId = undefined;
         if (msg.reply_to_message) {
@@ -204,26 +183,19 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         }
 
         try {
-            const extraOptions = {
+            const sentMsg = await ctx.telegram.copyMessage(RP_CHAT_ID, MY_TELEGRAM_ID, msg.message_id, {
                 message_thread_id: activeTopicId,
                 reply_to_message_id: replyToMessageId
-            };
-
-            const sentMsg = await ctx.telegram.copyMessage(RP_CHAT_ID, MY_TELEGRAM_ID, msg.message_id, extraOptions);
+            });
             
             msgMapToChat.set(msg.message_id.toString(), sentMsg.message_id.toString());
             msgMapToLog.set(sentMsg.message_id.toString(), msg.message_id.toString());
             saveDataToDisk();
-
             await ctx.react('✅').catch(() => {});
         } catch (error) {
-            console.error('Ошибка отправки в группу:', error);
-            await ctx.reply('❌ Не удалось отправить. Убедитесь, что бот добавлен в группу как админ со всеми правами.');
+            console.error('Ошибка отправки:', error);
         }
     }
 });
 
-bot.launch().then(() => console.log('Эмилия полностью защищена и обновлена!'));
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+bot.launch().then(() => console.log('Emilia upgraded successfully!'));
