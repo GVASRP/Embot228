@@ -45,7 +45,7 @@ loadDataFromDisk();
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Emilia Live\n');
+    res.end('Emilia Live with Edit Sync\n');
 }).listen(PORT);
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -92,15 +92,62 @@ bot.on('message_reaction', async (ctx) => {
     }
 });
 
-// ЕДИНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕГО
+// ЕДИНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ СООБЩЕНИЙ И ИХ РЕДАКТИРОВАНИЯ
 bot.on(['message', 'edited_message'], async (ctx) => {
-    const msg = ctx.message || ctx.editedMessage;
+    const msg = ctx.message || ctx.editedMessage || (ctx.update && ctx.update.edited_message);
     if (!msg) return;
 
     const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
     const isPrivate = ctx.chat.type === 'private';
+    const isEdit = !!(ctx.editedMessage || (ctx.update && ctx.update.edited_message));
 
-    // 1. ЕСЛИ ПРИШЛО СООБЩЕНИЕ ИЗ ГРУППЫ
+    // === ОБРАБОТКА ИЗМЕНЕНИЙ (РЕДАКТИРОВАНИЯ) ===
+    if (isEdit) {
+        if (isGroup) {
+            // Кто-то отредактировал сообщение в группе -> меняем его лог в твоей личке
+            const logMsgId = msgMapToLog.get(msg.message_id.toString());
+            if (logMsgId) {
+                try {
+                    const senderName = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
+                    let replyInfo = '';
+                    
+                    if (msg.reply_to_message && !msg.reply_to_message.forum_topic_created) {
+                        const origSender = msg.reply_to_message.from;
+                        const origName = origSender.username ? `@${origSender.username}` : origSender.first_name;
+                        replyInfo = ` (в ответ на ${origName})`;
+                    }
+
+                    const currentTopicId = msg.message_thread_id || 0;
+                    const forwardHeader = `💬 **${senderName}**${replyInfo} в теме [${topics.get(currentTopicId) || 'Главная'}]:\n`;
+
+                    if (msg.text) {
+                        await ctx.telegram.editMessageText(MY_TELEGRAM_ID, Number(logMsgId), null, forwardHeader + msg.text, { parse_mode: 'Markdown' });
+                    } else if (msg.caption) {
+                        await ctx.telegram.editMessageCaption(MY_TELEGRAM_ID, Number(logMsgId), null, forwardHeader + msg.caption, { parse_mode: 'Markdown' });
+                    }
+                } catch (e) {
+                    console.error('Не удалось обновить измененное сообщение в логе:', e);
+                }
+            }
+        } else if (isPrivate && msg.from.id === MY_TELEGRAM_ID) {
+            // Ты отредактировал сообщение в личке -> меняем его в группе от лица Эмилии
+            const targetGroupId = msgMapToChat.get(msg.message_id.toString());
+            if (targetGroupId && RP_CHAT_ID) {
+                try {
+                    if (msg.text) {
+                        await ctx.telegram.editMessageText(RP_CHAT_ID, Number(targetGroupId), null, msg.text);
+                    } else if (msg.caption) {
+                        await ctx.telegram.editMessageCaption(RP_CHAT_ID, Number(targetGroupId), null, msg.caption);
+                    }
+                } catch (e) {
+                    console.error('Не удалось изменить сообщение в группе:', e);
+                }
+            }
+        }
+        return; // Завершаем обработку для события изменения
+    }
+
+    // === ОБРАБОТКА НОВЫХ СООБЩЕНИЙ ===
     if (isGroup) {
         RP_CHAT_ID = ctx.chat.id;
         const currentTopicId = msg.message_thread_id || 0;
@@ -120,7 +167,6 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         }
         if (needSave) saveDataToDisk();
 
-        // Проверяем автора (игнорируем себя, пускаем других людей и нашего банк-бота)
         const isFromBank = msg.from.is_bot && msg.from.username === BANK_BOT_USERNAME;
         const isFromOtherUser = !msg.from.is_bot && msg.from.id !== MY_TELEGRAM_ID;
 
@@ -129,7 +175,6 @@ bot.on(['message', 'edited_message'], async (ctx) => {
                 const senderName = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
                 let replyInfo = '';
                 
-                // Проверяем реплай
                 if (msg.reply_to_message && !msg.reply_to_message.forum_topic_created) {
                     const origSender = msg.reply_to_message.from;
                     const origName = origSender.username ? `@${origSender.username}` : origSender.first_name;
@@ -139,11 +184,9 @@ bot.on(['message', 'edited_message'], async (ctx) => {
                 const forwardHeader = `💬 **${senderName}**${replyInfo} в теме [${topics.get(currentTopicId)}]:\n`;
 
                 let logMsg;
-                // ФИКС: Проверяем тип сообщения строго по наличию текста
                 if (msg.text) {
                     logMsg = await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader + msg.text, { parse_mode: 'Markdown' });
                 } else {
-                    // Если это гифка, фото или стикер — шлем заголовок, а потом копируем медиа
                     await ctx.telegram.sendMessage(MY_TELEGRAM_ID, forwardHeader, { parse_mode: 'Markdown' });
                     try {
                         logMsg = await ctx.telegram.copyMessage(MY_TELEGRAM_ID, RP_CHAT_ID, msg.message_id);
@@ -162,7 +205,6 @@ bot.on(['message', 'edited_message'], async (ctx) => {
         return;
     }
 
-    // 2. ЕСЛИ ТЫ ПИШЕШЬ БОТУ В ЛИЧКУ
     if (isPrivate && msg.from.id === MY_TELEGRAM_ID) {
         if (!RP_CHAT_ID || activeTopicId === null) return ctx.reply('⚠️ Сначала напишите в группе.');
 
@@ -186,7 +228,7 @@ bot.on(['message', 'edited_message'], async (ctx) => {
     }
 });
 
-bot.launch().then(() => console.log('Emilia is fully operational!'));
+bot.launch().then(() => console.log('Emilia with Edit Sync is fully operational!'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
